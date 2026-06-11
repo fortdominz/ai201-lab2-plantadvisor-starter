@@ -26,8 +26,40 @@ EXAMPLE_QUESTIONS = [
 
 
 def chat(message: str, history: list) -> str:
-    """Pass the user message and conversation history to the agent."""
-    return run_agent(message, history)
+    """Pass the user message and conversation history to the agent.
+
+    Gradio 6.x passes history as a list of dicts:
+        [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
+
+    Convert to the [user_msg, assistant_msg] pairs that run_agent expects.
+    """
+    converted = []
+    i = 0
+    while i < len(history):
+        item = history[i]
+        # Handle both dict format (Gradio 6.x) and tuple format (older Gradio)
+        if isinstance(item, dict):
+            if item.get("role") == "user":
+                user_msg = item.get("content", "")
+                assistant_msg = ""
+                if i + 1 < len(history) and history[i + 1].get("role") == "assistant":
+                    assistant_msg = history[i + 1].get("content", "") or ""
+                    i += 2
+                else:
+                    i += 1
+                converted.append([user_msg, assistant_msg])
+            else:
+                i += 1
+        else:
+            # Already a [user, assistant] pair
+            converted.append(item)
+            i += 1
+    try:
+        return run_agent(message, converted)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"⚠️ Error: {e}"
 
 
 # ──────────────────────────────────────────────
@@ -62,13 +94,11 @@ with gr.Blocks(title="Plant Advisor") as demo:
         with gr.Column(scale=3):
             chatbot = gr.ChatInterface(
                 fn=chat,
-                type="messages",
                 examples=EXAMPLE_QUESTIONS,
                 chatbot=gr.Chatbot(
                     height=520,
                     placeholder="<em>Ask me about your plants...</em>",
                     show_label=False,
-                    type="messages",
                 ),
                 textbox=gr.Textbox(
                     placeholder="e.g. How often should I water my monstera?",

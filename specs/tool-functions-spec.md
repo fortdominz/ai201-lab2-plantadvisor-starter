@@ -1,13 +1,13 @@
 # Spec: Tool Functions
 
 **File:** `tools.py`
-**Status:** `get_seasonal_conditions` — Pre-implemented, read through. `lookup_plant` — complete spec fields before implementing.
+**Status:** All three functions implemented. `get_plant_list` added as optional challenge.
 
 ---
 
 ## Purpose
 
-These two functions are the tools the agent can call. They retrieve structured data from the local plant database and seasonal data files and return it to the agent loop, which passes it to the LLM as context for generating a response.
+These functions are the tools the agent can call. They retrieve structured data from the local plant database and seasonal data files and return it to the agent loop, which passes it to the LLM as context for generating a response.
 
 ---
 
@@ -67,20 +67,27 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 
 #### Alias matching approach
 
-*Aliases are stored as a list of strings. How will you check if the normalized input matches any alias in the list? Write your approach in pseudocode or plain English.*
+For each plant in the database, lowercase every alias in its aliases list and check if the normalized input matches any of them:
 
 ```
-[your answer here]
+for each plant in _plant_db:
+    if normalized in [alias.lower() for alias in plant["aliases"]]:
+        return found result
 ```
+
+This is O(n * m) where n is the number of plants and m is the average alias count — acceptable for a small local database. For a database of thousands of plants, a pre-built reverse lookup dict (alias → key) at module load time would reduce this to O(1) per query.
 
 ---
 
 #### Not-found message
 
-*When a plant isn't found, the agent will read your message and use it to decide what to tell the user. Write the exact string you'll return — make it useful to the agent, not just to a human reading logs.*
+When a plant isn't found, the message tells the LLM exactly what it can and can't do — so it doesn't invent specific care data:
 
 ```
-[your answer here]
+f"'{plant_name}' is not in my plant database. My database includes: {list of display_names}. 
+Do not invent specific care instructions for this plant. Instead, acknowledge it's not in 
+your database and offer general guidance based on the plant type the user describes 
+(e.g., tropical, succulent, fern) without presenting it as specific data."
 ```
 
 ---
@@ -91,17 +98,19 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 
 **Test: does `"devil's ivy"` return the pothos entry?**
 ```
-[yes / no — if no, describe what happened]
+yes — matched via alias list on the pothos entry
 ```
 
 **Test: does `"SNAKE PLANT"` return the snake plant entry?**
 ```
-[yes / no — if no, describe what happened]
+yes — input normalized to "snake_plant" matched the direct key
 ```
 
 **One edge case you discovered while implementing:**
 ```
-[your answer here]
+Display name matching requires .lower() comparison since display_names are title-cased 
+(e.g., "Pothos") but normalized input is lowercase. Without .lower() on display_name, 
+a user typing "pothos" would miss the display name match and fall through to alias search.
 ```
 
 ---
@@ -183,12 +192,65 @@ The full season dict from `_season_data`, plus a `detected_season` boolean. Exam
 
 **Test: does calling with `season=None` return the correct season for the current month?**
 ```
-Current month: [month]
-Expected season: [season]
-Returned season: [season]
+Current month: June (6)
+Expected season: Summer
+Returned season: Summer (name field) | detected_season: True ✓
 ```
 
 **Test: does calling with `season="winter"` return winter data regardless of the current month?**
 ```
-[yes / no]
+yes — returns name: "Winter" with detected_season: False, confirming the
+caller-specified branch is taken and auto-detection is skipped.
+```
+
+---
+
+## Function 3: `get_plant_list()` — Optional Challenge
+
+### Input / Output Contract
+
+**Inputs:** None
+
+**Output:** `dict`
+
+```python
+{
+    "total": 15,
+    "plants": [{"name": "Pothos", "difficulty": "easy"}, ...],
+    "by_difficulty": {
+        "easy": ["Pothos", "Snake Plant", ...],
+        "moderate": ["Monstera", "Rubber Plant", ...],
+        "hard": ["Fiddle Leaf Fig", "Calathea"]
+    }
+}
+```
+
+### Design Decisions
+
+**Why group by difficulty?** Questions like "what's a good beginner plant?" require the LLM
+to filter by difficulty. Returning a flat list forces the LLM to scan every entry; grouping
+by difficulty gives it the relevant subset directly.
+
+**No input parameters.** The function always returns the full database — the LLM decides
+what subset to surface in its response. This keeps the tool simple and avoids a search
+API design that would duplicate `lookup_plant`'s responsibility.
+
+### Implementation Notes
+
+**Test: does `"what plants are good for beginners?"` trigger this tool?**
+```
+yes — the LLM calls get_plant_list() and surfaces the easy-difficulty entries.
+```
+
+**Test: does `"what plants do you know about?"` trigger this tool?**
+```
+No — this is a documented limitation. The model answers this meta-question from
+its training data rather than calling get_plant_list, because it has strong priors
+about common houseplants. The tool fires reliably for difficulty-based questions
+("good beginner plant") where the model needs structured data it doesn't have.
+The plant list was injected into the system prompt as a fallback so the model can
+at least read the correct names from context.
+
+Key insight: tool descriptions control *which* tool gets called, not *whether* the
+model decides it needs a tool at all. This maps to Discussion Prompt #1.
 ```

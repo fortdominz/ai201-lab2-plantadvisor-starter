@@ -1,9 +1,27 @@
 import json
 from groq import Groq
 from config import GROQ_API_KEY, LLM_MODEL, MAX_TOOL_ROUNDS
-from tools import lookup_plant, get_seasonal_conditions
+from tools import lookup_plant, get_seasonal_conditions, get_plant_list
 
 _client = Groq(api_key=GROQ_API_KEY)
+
+# ──────────────────────────────────────────────
+# Plant context — injected into system prompt at startup
+#
+# The plant list is static database metadata, not dynamic runtime data.
+# Injecting it directly into the context is more reliable than asking the
+# LLM to call a tool for a question it thinks it already knows the answer to
+# from training data. The get_plant_list tool still serves for difficulty-based
+# recommendation queries where the LLM needs to reason over the full list.
+# ──────────────────────────────────────────────
+
+_plant_data = get_plant_list()
+_PLANT_CONTEXT = (
+    f"Plants in your database ({_plant_data['total']} total):\n"
+    f"  Easy care:     {', '.join(_plant_data['by_difficulty']['easy'])}\n"
+    f"  Moderate care: {', '.join(_plant_data['by_difficulty']['moderate'])}\n"
+    f"  Hard care:     {', '.join(_plant_data['by_difficulty']['hard'])}\n"
+)
 
 # ──────────────────────────────────────────────
 # Tool definitions
@@ -39,6 +57,26 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "get_plant_list",
+            "description": (
+                "Return the full list of houseplants in this database, grouped by care difficulty. "
+                "Use this tool whenever the user asks: which plants are in your database, "
+                "what plants do you know about, what plants can you help with, "
+                "what's a good beginner or easy plant, what plants are hard to care for, "
+                "or any question that requires knowing the complete set of plants available. "
+                "Do NOT answer questions about database contents from general knowledge — "
+                "always call this tool first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_seasonal_conditions",
             "description": (
                 "Get seasonal care adjustments for houseplants. "
@@ -68,11 +106,14 @@ SYSTEM_PROMPT = (
     "You are a knowledgeable and friendly plant care advisor. "
     "Help users care for their houseplants by looking up specific plant information "
     "and current seasonal conditions using your available tools.\n\n"
-    "Always use your tools to look up plant-specific information before answering — "
-    "don't rely on your general knowledge alone. If a plant isn't in your database, "
-    "say so clearly and offer general guidance based on what the user describes.\n\n"
-    "Keep your advice practical and specific. Cite the source of your information "
-    "when you have it (e.g., 'According to the care data for your monstera...')."
+    f"{_PLANT_CONTEXT}\n"
+    "Use lookup_plant whenever a user asks about a specific plant by name. "
+    "Use get_seasonal_conditions when a question involves a specific season or time of year. "
+    "Use get_plant_list when a user asks for plant recommendations by difficulty.\n\n"
+    "When lookup_plant returns found: False, tell the user the plant is not in your database "
+    "and offer general guidance based on what they describe — do not invent specific care data.\n\n"
+    "Keep your advice practical. Cite your source when you have data "
+    "(e.g., 'According to the care data for your monstera...')."
 )
 
 # ──────────────────────────────────────────────
@@ -88,6 +129,8 @@ def dispatch_tool(tool_name: str, tool_args: dict) -> str:
     print(f"  → Tool call: {tool_name}({tool_args})")
     if tool_name == "lookup_plant":
         result = lookup_plant(tool_args["plant_name"])
+    elif tool_name == "get_plant_list":
+        result = get_plant_list()
     elif tool_name == "get_seasonal_conditions":
         result = get_seasonal_conditions(tool_args.get("season"))
     else:
@@ -104,28 +147,54 @@ def run_agent(user_message: str, history: list) -> str:
     """
     Run the plant care agent for one user turn and return its response.
 
-    TODO — Milestone 2:
-
-    The agent loop follows a specific pattern that you'll implement here. Read
-    specs/agent-loop-spec.md carefully before writing any code — understand the
-    full loop before implementing any part of it.
-
-    The loop works like this:
-      1. Build a messages list: system prompt + conversation history + new user message
-      2. Call the LLM with messages and TOOL_DEFINITIONS
-      3. If the response contains tool_calls:
-           a. Append the assistant message (with tool_calls) to messages
-           b. For each tool call: execute via dispatch_tool(), append the result
-           c. Call the LLM again with the updated messages
-           d. Repeat until no more tool_calls (or MAX_TOOL_ROUNDS is reached)
-      4. Return the final text response
-
-    Key details to get right:
-      - The assistant message must be appended BEFORE tool results
-      - Tool result messages use role="tool" with a tool_call_id field
-      - Append the assistant's message object directly (not just its content)
-      - The history format from Gradio: list of [user_message, assistant_message] pairs
-
-    Before writing code, complete specs/agent-loop-spec.md.
+    Builds a messages list, calls the LLM with tool definitions, and loops
+    until the LLM produces a final text response or MAX_TOOL_ROUNDS is reached.
     """
-    return "🌱 Agent not yet implemented. Complete Milestone 2 to activate the Plant Advisor."
+    # 1. Build messages: system prompt + history + new user message
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    for user_msg, assistant_msg in history:
+        messages.append({"role": "user", "content": user_msg})
+        if assistant_msg:
+            messages.append({"role": "assistant", "content": assistant_msg})
+
+    messages.append({"role": "user", "content": user_message})
+
+    # 2. Agent loop — runs until LLM stops calling tools or MAX_TOOL_ROUNDS hit
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            tools=TOOL_DEFINITIONS,
+            tool_choice="auto",
+        )
+
+        assistant_message = response.choices[0].message
+
+        # No tool calls — LLM has a final answer
+        if not assistant_message.tool_calls:
+            return assistant_message.content or "I wasn't able to generate a response. Please try again."
+
+        # Append assistant message BEFORE tool results (API requires this order)
+        messages.append(assistant_message)
+
+        # Execute each tool call and append results
+        for tool_call in assistant_message.tool_calls:
+            tool_name = tool_call.function.name
+            tool_args = json.loads(tool_call.function.arguments)
+            tool_result = dispatch_tool(tool_name, tool_args)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": tool_result,
+            })
+
+    # MAX_TOOL_ROUNDS reached — force a final text response with no more tools
+    response = _client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=messages,
+        tools=TOOL_DEFINITIONS,
+        tool_choice="none",
+    )
+    return response.choices[0].message.content or "I reached my reasoning limit. Please try a simpler question."

@@ -119,45 +119,43 @@ for tool_call in assistant_message.tool_calls:
 
 ### Loop termination conditions
 
-*The loop should stop when: (a) the LLM returns a response with no tool calls, OR (b) the MAX_TOOL_ROUNDS limit is reached. Describe how you will detect each condition and what you will return in each case.*
+Condition (a) — no tool calls: After each LLM call, check `assistant_message.tool_calls`. If it's falsy (None or empty list), the LLM has finished reasoning and produced a final text answer. Return `assistant_message.content` immediately.
 
-```
-[your answer here]
-```
+Condition (b) — MAX_TOOL_ROUNDS reached: The for loop runs at most MAX_TOOL_ROUNDS iterations. If the loop exhausts all rounds without a non-tool response, make one final LLM call with `tool_choice="none"` to force a text response and return that. This prevents an empty return while still exiting the loop safely.
 
 ---
 
 ### Extracting the final text response
 
-*Once the loop exits because there are no more tool calls, how do you extract the text content from the response object? What field holds the string you should return?*
-
-```
-[your answer here]
-```
+The final text lives at `response.choices[0].message.content`. This is a string when the LLM responds with text. Guard against None with `or "fallback message"` in case the API returns an empty content field.
 
 ---
 
 ## Implementation Notes
 
-*Fill this in after implementing and testing.*
-
 **Trace of a working agent turn (what tools were called and in what order):**
 
 ```
 Query: "How should I care for my calathea?"
-Round 1 tool call: [tool name, args]
-Round 2 tool call: [tool name, args] (if any)
-Final response: [brief description]
+Round 1 tool call: lookup_plant({'plant_name': 'calathea'})
+Round 2 tool call: get_seasonal_conditions({})
+Final response: Specific calathea care advice with current seasonal context
 ```
 
 **What happens when you ask about a plant that isn't in the database?**
 
 ```
-[describe the behavior you observed]
+lookup_plant returns {"found": False, "message": "...not in database..."}.
+The LLM reads the not-found message, acknowledges the plant isn't in its database,
+and offers general guidance for tropical/humidity-loving plants without inventing
+specific care data.
 ```
 
 **One thing about the tool call API that surprised you:**
 
 ```
-[your answer here]
+The assistant message containing tool_calls must be appended to messages before
+the tool results — even though logically the results "belong" to that call. The
+API uses tool_call_id to match results to requests, but the ordering constraint
+is strict: assistant message first, then tool results, always.
 ```
